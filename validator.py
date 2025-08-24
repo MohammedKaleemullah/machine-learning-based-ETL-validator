@@ -10,9 +10,6 @@ import os
 
 MODEL_PATH = "./uber_iforest.pkl"
 
-# -------------------------
-# Utility: Haversine distance
-# -------------------------
 def haversine(lon1, lat1, lon2, lat2):
     """Calculate distance in km between two lat/lon points"""
     R = 6371  # Earth radius
@@ -23,9 +20,6 @@ def haversine(lon1, lat1, lon2, lat2):
     c = 2 * np.arcsin(np.sqrt(a))
     return R * c
 
-# -------------------------
-# Schema inference
-# -------------------------
 def infer_schema(df: pd.DataFrame):
     schema = {}
     for col in df.columns:
@@ -35,16 +29,10 @@ def infer_schema(df: pd.DataFrame):
             schema[col] = "categorical"
     return schema
 
-# -------------------------
-# Train Isolation Forest
-# -------------------------
 def train_isolation_forest(df: pd.DataFrame, columns_to_avoid=None):
     if columns_to_avoid is None:
         columns_to_avoid = []
 
-    # -------------------------
-    # Feature engineering
-    # -------------------------
     df = df.copy()
     df["trip_distance_km"] = haversine(
         df["pickup_longitude"], df["pickup_latitude"],
@@ -52,7 +40,6 @@ def train_isolation_forest(df: pd.DataFrame, columns_to_avoid=None):
     )
     df["fare_per_km"] = df["fare_amount"] / df["trip_distance_km"].replace(0, 1)
 
-    # Drop ignored columns
     train_df = df.drop(columns=columns_to_avoid, errors="ignore")
 
     num_cols = train_df.select_dtypes(include=["int64", "float64"]).columns.tolist()
@@ -82,26 +69,18 @@ def train_isolation_forest(df: pd.DataFrame, columns_to_avoid=None):
         "columns_to_avoid": columns_to_avoid
     }, MODEL_PATH)
 
-    print(f"✅ Isolation Forest trained on features: {num_cols + cat_cols} (excluding {columns_to_avoid})")
+    print(f"Isolation Forest trained on features: {num_cols + cat_cols} (excluding {columns_to_avoid})")
 
-# -------------------------
-# Load model
-# -------------------------
+
 def load_model():
     if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError("Isolation Forest model not trained yet! Please run training.")
+        raise FileNotFoundError("Isolation Forest model not trained ")
     return joblib.load(MODEL_PATH)
 
-# -------------------------
-# Validate new rows
-# -------------------------
 def validate_new_rows(new_rows: pd.DataFrame, schema: dict):
     valid_rows, invalid_rows = [], []
     errors = []
 
-    # -------------------------
-    # Rule-based schema validation
-    # -------------------------
     for idx, row in new_rows.iterrows():
         row_errors = []
 
@@ -111,7 +90,7 @@ def validate_new_rows(new_rows: pd.DataFrame, schema: dict):
                     float(row[col])
                 except ValueError:
                     row_errors.append(f"Column {col} should be numeric, got {row[col]}")
-                    
+
         if row_errors:
             errors.extend(row_errors)
             invalid_rows.append(row)
@@ -121,15 +100,12 @@ def validate_new_rows(new_rows: pd.DataFrame, schema: dict):
     valid_df = pd.DataFrame(valid_rows) if valid_rows else pd.DataFrame()
     invalid_df = pd.DataFrame(invalid_rows) if invalid_rows else pd.DataFrame()
 
-    # -------------------------
-    # ML anomaly detection
-    # -------------------------
+    # ML model anomaly detection is applied only on valid rows
     if not valid_df.empty:
         saved_obj = load_model()
         pipeline = saved_obj["pipeline"]
         columns_to_avoid = saved_obj.get("columns_to_avoid", [])
 
-        # Feature engineering same as training
         valid_df = valid_df.copy()
         valid_df["trip_distance_km"] = haversine(
             valid_df["pickup_longitude"], valid_df["pickup_latitude"],
@@ -150,7 +126,7 @@ def validate_new_rows(new_rows: pd.DataFrame, schema: dict):
             errors.append(f"ML flagged {len(anomalies)} anomalies")
             invalid_df = pd.concat([invalid_df, anomalies])
             valid_df = valid_df[valid_df["anomaly"] == 1]
-            print("\n🚨 ML detected anomalies:")
+            print("\nML detected anomalies:")
             print(anomalies[["uid","fare_amount","passenger_count","trip_distance_km","fare_per_km","anomaly_score"]].to_string(index=False))
 
     return {
