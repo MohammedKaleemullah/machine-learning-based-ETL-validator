@@ -1,74 +1,117 @@
 # validator.py
 import pandas as pd
-import json
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.ensemble import IsolationForest
+import joblib
+import os
+
+MODEL_PATH = "./uber_iforest.pkl"
 
 def infer_schema(df: pd.DataFrame):
-    """
-    Dynamically infer schema (dtypes + simple rules) from the given dataframe.
-    """
+    """Infer schema dynamically from existing dataframe"""
     schema = {}
     for col in df.columns:
-        dtype = str(df[col].dtype)
-
-        # rules = {}
-        # if pd.api.types.is_numeric_dtype(df[col]):
-        #     rules["min"] = df[col].min(skipna=True)
-        #     rules["max"] = df[col].max(skipna=True)
-        # elif pd.api.types.is_datetime64_any_dtype(df[col]):
-        #     rules["parseable"] = True
-        # elif pd.api.types.is_string_dtype(df[col]):
-        #     rules["allowed_values"] = df[col].dropna().unique().tolist() if df[col].nunique() < 20 else None
-
-        schema[col] = {
-            "dtype": dtype
-            # "rules": rules
-        }
+        if pd.api.types.is_numeric_dtype(df[col]):
+            schema[col] = "numeric"
+        else:
+            schema[col] = "categorical"
     return schema
 
 
-def validate_new_rows(new_df: pd.DataFrame, schema: dict):
-    """
-    Validate new rows dynamically based on inferred schema.
-    Returns dict: {"valid": DataFrame, "invalid": DataFrame, "errors": list}
-    """
-    valid_rows = []
-    invalid_rows = []
+def train_isolation_forest(df: pd.DataFrame, columns_to_avoid=None):
+    """Train preprocessing pipeline + Isolation Forest model"""
+    if columns_to_avoid is None:
+        columns_to_avoid = []
+
+    # Keep only training features
+    train_df = df.drop(columns=columns_to_avoid, errors="ignore")
+
+    num_cols = train_df.select_dtypes(include=["int64", "float64"]).columns.tolist()
+    cat_cols = train_df.select_dtypes(include=["object"]).columns.tolist()
+
+    numeric_transformer = StandardScaler()
+    categorical_transformer = OneHotEncoder(handle_unknown="ignore")
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", numeric_transformer, num_cols),
+            ("cat", categorical_transformer, cat_cols),
+        ]
+    )
+
+    model = IsolationForest(contamination=0.05, random_state=42)
+
+    pipeline = Pipeline(steps=[
+        ("preprocessor", preprocessor),
+        ("isolation_forest", model)
+    ])
+
+    pipeline.fit(train_df)
+
+    joblib.dump({
+        "pipeline": pipeline,
+        "columns_to_avoid": columns_to_avoid
+    }, MODEL_PATH)
+
+    print(f"✅ Isolation Forest trained (excluding {columns_to_avoid}) and saved to {MODEL_PATH}")
+
+
+def load_model():
+    if not os.path.exists(MODEL_PATH):
+        raise FileNotFoundError("Isolation Forest model not trained yet! Please run training.")
+    return joblib.load(MODEL_PATH)
+
+
+def validate_new_rows(new_rows: pd.DataFrame, schema: dict):
+    """Validate schema + detect anomalies"""
+    valid_rows, invalid_rows = [], []
     errors = []
 
-    for idx, row in new_df.iterrows():
+    # Schema validation
+    for idx, row in new_rows.iterrows():
         row_errors = []
-
-        for col, ruleset in schema.items():
-            expected_dtype = ruleset["dtype"]
-
-            # dtype check
-            try:
-                if "int" in expected_dtype:
-                    _ = int(row[col])
-                elif "float" in expected_dtype:
-                    _ = float(row[col])
-                elif "datetime" in expected_dtype:
-                    pd.to_datetime(row[col])
-            except Exception:
-                row_errors.append(f"{col}: type mismatch (expected {expected_dtype})")
-
-            # # rules check
-            # rules = ruleset["rules"]
-            # if "min" in rules and row[col] < rules["min"]:
-            #     row_errors.append(f"{col}: below min {rules['min']}")
-            # if "max" in rules and row[col] > rules["max"]:
-            #     row_errors.append(f"{col}: above max {rules['max']}")
-            # if rules.get("allowed_values") and row[col] not in rules["allowed_values"]:
-            #     row_errors.append(f"{col}: value not allowed")
-
+        for col, expected_type in schema.items():
+            if expected_type == "numeric":
+                try:
+                    float(row[col])
+                except ValueError:
+                    row_errors.append(f"Column {col} should be numeric, got {row[col]}")
         if row_errors:
-            errors.append({ "row": idx, "violations": row_errors, "preview": row.to_dict() })
+            errors.extend(row_errors)
             invalid_rows.append(row)
         else:
             valid_rows.append(row)
 
+    valid_df = pd.DataFrame(valid_rows) if valid_rows else pd.DataFrame()
+    invalid_df = pd.DataFrame(invalid_rows) if invalid_rows else pd.DataFrame()
+
+    # ML anomaly detection
+    if not valid_df.empty:
+        saved_obj = load_model()
+        pipeline = saved_obj["pipeline"]
+        columns_to_avoid = saved_obj.get("columns_to_avoid", [])
+
+        # Drop avoid columns before prediction
+        predict_df = valid_df.drop(columns=columns_to_avoid, errors="ignore")
+
+        preds = pipeline.predict(predict_df)   # 1 = normal, -1 = anomaly
+        scores = pipeline.decision_function(predict_df)
+
+        valid_df["anomaly"] = preds
+        valid_df["anomaly_score"] = scores
+
+        anomalies = valid_df[valid_df["anomaly"] == -1]
+        if not anomalies.empty:
+            errors.append(f"ML flagged {len(anomalies)} anomalies")
+            invalid_df = pd.concat([invalid_df, anomalies])
+            valid_df = valid_df[valid_df["anomaly"] == 1]
+            print("\n🚨 ML detected anomalies:")
+            print(anomalies[["uid", "fare_amount", "passenger_count", "anomaly_score"]].to_string(index=False))
+
     return {
-        "valid": pd.DataFrame(valid_rows) if valid_rows else pd.DataFrame(columns=new_df.columns),
-        "invalid": pd.DataFrame(invalid_rows) if invalid_rows else pd.DataFrame(columns=new_df.columns),
+        "valid": valid_df.drop(columns=["anomaly", "anomaly_score"], errors="ignore"),
+        "invalid": invalid_df,
         "errors": errors
     }

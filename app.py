@@ -8,6 +8,7 @@ from IPython.display import display
 from validator import validate_new_rows, infer_schema
 
 CDC_LOG = "./watched_dir/cdc_events.csv"   # log file path
+ANAMOLY_LOG = "./watched_dir/anomalies.csv"  # anomaly log file path
 
 class CSVWatcher(FileSystemEventHandler):
     def __init__(self, file_path: str):
@@ -46,6 +47,11 @@ class CSVWatcher(FileSystemEventHandler):
                         display(f"[CDC EVENT] ⚠️ Validation errors:\n{validation_result['errors']}\n")
                         if not validation_result["invalid"].empty:
                             display(f"❌ Invalid rows skipped:\n{validation_result['invalid'].to_string(index=False)}\n")
+                        # Append invalid rows to anomaly log file
+                        if not os.path.exists(ANAMOLY_LOG):
+                            validation_result["invalid"].to_csv(ANAMOLY_LOG, index=False, mode="w")
+                        else:
+                            validation_result["invalid"].to_csv(ANAMOLY_LOG, index=False, mode="a", header=False)
 
                 self.last_df = new_df
             except Exception as e:
