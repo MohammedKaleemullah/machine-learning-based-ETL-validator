@@ -1,72 +1,74 @@
 # validator.py
 import pandas as pd
-import hashlib
 import json
-from datetime import datetime
 
 def infer_schema(df: pd.DataFrame):
+    """
+    Dynamically infer schema (dtypes + simple rules) from the given dataframe.
+    """
     schema = {}
-    for col, dtype in df.dtypes.items():
-        col_rules = {"not_null": True}
+    for col in df.columns:
+        dtype = str(df[col].dtype)
 
-        if "int" in str(dtype) or "float" in str(dtype):
-            col_rules["min"] = 0 if "fare" in col or "count" in col else None
-            if "longitude" in col:
-                col_rules["range"] = [-75, -72]
-            if "latitude" in col:
-                col_rules["range"] = [40, 42]
+        # rules = {}
+        # if pd.api.types.is_numeric_dtype(df[col]):
+        #     rules["min"] = df[col].min(skipna=True)
+        #     rules["max"] = df[col].max(skipna=True)
+        # elif pd.api.types.is_datetime64_any_dtype(df[col]):
+        #     rules["parseable"] = True
+        # elif pd.api.types.is_string_dtype(df[col]):
+        #     rules["allowed_values"] = df[col].dropna().unique().tolist() if df[col].nunique() < 20 else None
 
-        if "datetime" in col or "date" in col:
-            col_rules["datetime"] = True
-
-        if "count" in col:
-            col_rules["allowed"] = list(range(1, 7))
-
-        schema[col] = {"dtype": str(dtype), "rules": col_rules}
+        schema[col] = {
+            "dtype": dtype
+            # "rules": rules
+        }
     return schema
 
 
-def coerce_types(row, schema):
+def validate_new_rows(new_df: pd.DataFrame, schema: dict):
+    """
+    Validate new rows dynamically based on inferred schema.
+    Returns dict: {"valid": DataFrame, "invalid": DataFrame, "errors": list}
+    """
+    valid_rows = []
+    invalid_rows = []
     errors = []
-    coerced = {}
-    for col, spec in schema.items():
-        try:
-            if spec["dtype"].startswith("int"):
-                coerced[col] = int(row[col])
-            elif spec["dtype"].startswith("float"):
-                coerced[col] = float(row[col])
-            elif spec["rules"].get("datetime"):
-                coerced[col] = pd.to_datetime(row[col])
-            else:
-                coerced[col] = str(row[col])
-        except Exception:
-            errors.append(f"type_error:{col}")
-            coerced[col] = None
-    return coerced, errors
 
+    for idx, row in new_df.iterrows():
+        row_errors = []
 
-def run_rules(row, schema):
-    errors = []
-    for col, spec in schema.items():
-        val = row.get(col)
+        for col, ruleset in schema.items():
+            expected_dtype = ruleset["dtype"]
 
-        if spec["rules"].get("not_null") and (val is None or pd.isna(val)):
-            errors.append(f"{col}:null")
+            # dtype check
+            try:
+                if "int" in expected_dtype:
+                    _ = int(row[col])
+                elif "float" in expected_dtype:
+                    _ = float(row[col])
+                elif "datetime" in expected_dtype:
+                    pd.to_datetime(row[col])
+            except Exception:
+                row_errors.append(f"{col}: type mismatch (expected {expected_dtype})")
 
-        if "min" in spec["rules"] and spec["rules"]["min"] is not None:
-            if val is not None and val < spec["rules"]["min"]:
-                errors.append(f"{col}:below_min")
+            # # rules check
+            # rules = ruleset["rules"]
+            # if "min" in rules and row[col] < rules["min"]:
+            #     row_errors.append(f"{col}: below min {rules['min']}")
+            # if "max" in rules and row[col] > rules["max"]:
+            #     row_errors.append(f"{col}: above max {rules['max']}")
+            # if rules.get("allowed_values") and row[col] not in rules["allowed_values"]:
+            #     row_errors.append(f"{col}: value not allowed")
 
-        if "range" in spec["rules"]:
-            lo, hi = spec["rules"]["range"]
-            if val is not None and not (lo <= val <= hi):
-                errors.append(f"{col}:out_of_range")
+        if row_errors:
+            errors.append({ "row": idx, "violations": row_errors, "preview": row.to_dict() })
+            invalid_rows.append(row)
+        else:
+            valid_rows.append(row)
 
-        if "allowed" in spec["rules"]:
-            if val not in spec["rules"]["allowed"]:
-                errors.append(f"{col}:not_allowed")
-    return errors
-
-
-def row_hash(row):
-    return hashlib.md5(json.dumps(row, default=str).encode()).hexdigest()
+    return {
+        "valid": pd.DataFrame(valid_rows) if valid_rows else pd.DataFrame(columns=new_df.columns),
+        "invalid": pd.DataFrame(invalid_rows) if invalid_rows else pd.DataFrame(columns=new_df.columns),
+        "errors": errors
+    }
