@@ -155,3 +155,28 @@ Invalid rows skipped:
      uid  fare_amount  passenger_count  anomaly_score
 56186116         7.07                1       -0.15955
 ```
+
+---
+
+# Model Evaluation with Synthetic Anomalies
+
+---
+
+## Metrics
+
+| Metric    | Value |
+| --------- | ----- |
+| Precision | 0.933 |
+| Recall    | 0.840 |
+| F1 Score  | 0.884 |
+
+---
+
+## Confusion Matrix
+
+| Actual \ Predicted | Normal (0) | Anomaly (1) |
+| ------------------ | ---------- | ----------- |
+| Normal (0)         | 47         | 3           |
+| Anomaly (1)        | 8          | 42          |
+
+---
