@@ -27,21 +27,21 @@ df_eval["fare_per_km"] = df_eval["fare_amount"] / df_eval["trip_distance_km"].re
 
 X = df_eval.drop(columns=columns_to_avoid, errors="ignore")
 
+
+#metric evaluation with synthetic anomalies
+
 base_lat = 40.758
 coord = random.uniform(-180, 180)
 
-# Create 50 synthetic anomalies
 synthetic_anomalies = df_eval.sample(50, replace=True).copy()
 synthetic_anomalies["fare_amount"] = [round(random.uniform(0, 100), 2) for _ in range(len(synthetic_anomalies))]
 synthetic_anomalies["pickup_longitude"] = [random.uniform(-180, 180) for _ in range(len(synthetic_anomalies))]
 synthetic_anomalies["pickup_latitude"] = [base_lat for _ in range(len(synthetic_anomalies))]
 synthetic_anomalies["trip_distance_km"] *= np.random.randint(50, 200, size=len(synthetic_anomalies))
 
-# Labelling data: 0=normal, 1=anomaly
 X_all = pd.concat([X[:50], synthetic_anomalies.drop(columns=columns_to_avoid, errors="ignore")])
 y_true = np.array([0]*50 + [1]*len(synthetic_anomalies))
 
-# Predict
 y_pred = pipeline.predict(X_all)
 y_pred = np.where(y_pred == -1, 1, 0)
 
