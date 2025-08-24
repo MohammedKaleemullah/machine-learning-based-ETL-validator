@@ -1,5 +1,6 @@
 # validator.py
 import pandas as pd
+import numpy as np
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -9,8 +10,23 @@ import os
 
 MODEL_PATH = "./uber_iforest.pkl"
 
+# -------------------------
+# Utility: Haversine distance
+# -------------------------
+def haversine(lon1, lat1, lon2, lat2):
+    """Calculate distance in km between two lat/lon points"""
+    R = 6371  # Earth radius
+    lon1, lat1, lon2, lat2 = map(np.radians, [lon1, lat1, lon2, lat2])
+    dlon = lon2 - lon1
+    dlat = lat2 - lat1
+    a = np.sin(dlat/2)**2 + np.cos(lat1)*np.cos(lat2)*np.sin(dlon/2)**2
+    c = 2 * np.arcsin(np.sqrt(a))
+    return R * c
+
+# -------------------------
+# Schema inference
+# -------------------------
 def infer_schema(df: pd.DataFrame):
-    """Infer schema dynamically from existing dataframe"""
     schema = {}
     for col in df.columns:
         if pd.api.types.is_numeric_dtype(df[col]):
@@ -19,13 +35,24 @@ def infer_schema(df: pd.DataFrame):
             schema[col] = "categorical"
     return schema
 
-
+# -------------------------
+# Train Isolation Forest
+# -------------------------
 def train_isolation_forest(df: pd.DataFrame, columns_to_avoid=None):
-    """Train preprocessing pipeline + Isolation Forest model"""
     if columns_to_avoid is None:
         columns_to_avoid = []
 
-    # Keep only training features
+    # -------------------------
+    # Feature engineering
+    # -------------------------
+    df = df.copy()
+    df["trip_distance_km"] = haversine(
+        df["pickup_longitude"], df["pickup_latitude"],
+        df["dropoff_longitude"], df["dropoff_latitude"]
+    )
+    df["fare_per_km"] = df["fare_amount"] / df["trip_distance_km"].replace(0, 1)
+
+    # Drop ignored columns
     train_df = df.drop(columns=columns_to_avoid, errors="ignore")
 
     num_cols = train_df.select_dtypes(include=["int64", "float64"]).columns.tolist()
@@ -43,7 +70,7 @@ def train_isolation_forest(df: pd.DataFrame, columns_to_avoid=None):
 
     model = IsolationForest(contamination=0.05, random_state=42)
 
-    pipeline = Pipeline(steps=[
+    pipeline = Pipeline([
         ("preprocessor", preprocessor),
         ("isolation_forest", model)
     ])
@@ -55,29 +82,36 @@ def train_isolation_forest(df: pd.DataFrame, columns_to_avoid=None):
         "columns_to_avoid": columns_to_avoid
     }, MODEL_PATH)
 
-    print(f"✅ Isolation Forest trained (excluding {columns_to_avoid}) and saved to {MODEL_PATH}")
+    print(f"✅ Isolation Forest trained on features: {num_cols + cat_cols} (excluding {columns_to_avoid})")
 
-
+# -------------------------
+# Load model
+# -------------------------
 def load_model():
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError("Isolation Forest model not trained yet! Please run training.")
     return joblib.load(MODEL_PATH)
 
-
+# -------------------------
+# Validate new rows
+# -------------------------
 def validate_new_rows(new_rows: pd.DataFrame, schema: dict):
-    """Validate schema + detect anomalies"""
     valid_rows, invalid_rows = [], []
     errors = []
 
-    # Schema validation
+    # -------------------------
+    # Rule-based schema validation
+    # -------------------------
     for idx, row in new_rows.iterrows():
         row_errors = []
+
         for col, expected_type in schema.items():
             if expected_type == "numeric":
                 try:
                     float(row[col])
                 except ValueError:
                     row_errors.append(f"Column {col} should be numeric, got {row[col]}")
+                    
         if row_errors:
             errors.extend(row_errors)
             invalid_rows.append(row)
@@ -87,16 +121,25 @@ def validate_new_rows(new_rows: pd.DataFrame, schema: dict):
     valid_df = pd.DataFrame(valid_rows) if valid_rows else pd.DataFrame()
     invalid_df = pd.DataFrame(invalid_rows) if invalid_rows else pd.DataFrame()
 
+    # -------------------------
     # ML anomaly detection
+    # -------------------------
     if not valid_df.empty:
         saved_obj = load_model()
         pipeline = saved_obj["pipeline"]
         columns_to_avoid = saved_obj.get("columns_to_avoid", [])
 
-        # Drop avoid columns before prediction
+        # Feature engineering same as training
+        valid_df = valid_df.copy()
+        valid_df["trip_distance_km"] = haversine(
+            valid_df["pickup_longitude"], valid_df["pickup_latitude"],
+            valid_df["dropoff_longitude"], valid_df["dropoff_latitude"]
+        )
+        valid_df["fare_per_km"] = valid_df["fare_amount"] / valid_df["trip_distance_km"].replace(0, 1)
+
         predict_df = valid_df.drop(columns=columns_to_avoid, errors="ignore")
 
-        preds = pipeline.predict(predict_df)   # 1 = normal, -1 = anomaly
+        preds = pipeline.predict(predict_df)  # 1=normal, -1=anomaly
         scores = pipeline.decision_function(predict_df)
 
         valid_df["anomaly"] = preds
@@ -108,10 +151,10 @@ def validate_new_rows(new_rows: pd.DataFrame, schema: dict):
             invalid_df = pd.concat([invalid_df, anomalies])
             valid_df = valid_df[valid_df["anomaly"] == 1]
             print("\n🚨 ML detected anomalies:")
-            print(anomalies[["uid", "fare_amount", "passenger_count", "anomaly_score"]].to_string(index=False))
+            print(anomalies[["uid","fare_amount","passenger_count","trip_distance_km","fare_per_km","anomaly_score"]].to_string(index=False))
 
     return {
-        "valid": valid_df.drop(columns=["anomaly", "anomaly_score"], errors="ignore"),
+        "valid": valid_df.drop(columns=["anomaly","anomaly_score"], errors="ignore"),
         "invalid": invalid_df,
         "errors": errors
     }

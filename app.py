@@ -8,6 +8,7 @@ from IPython.display import display
 from validator import validate_new_rows, infer_schema
 
 CDC_LOG = "./watched_dir/cdc_events.csv"   # log file path
+
 ANAMOLY_LOG = "./watched_dir/anomalies.csv"  # anomaly log file path
 
 class CSVWatcher(FileSystemEventHandler):
